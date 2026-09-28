@@ -8,6 +8,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
+# 确保环境变量 PORTALS_AUTH 已正确配置，且值以 "tma " 开头
 PORTALS_AUTH = os.getenv("PORTALS_AUTH")
 
 if not BOT_TOKEN:
@@ -56,6 +57,7 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gift_name = parts[0]
         filters = parts[1:] if len(parts) > 1 else []
 
+        # 调用 search 函数，并显式传入 authData
         if len(filters) >= 2:
             results = search(
                 gift_name=gift_name,

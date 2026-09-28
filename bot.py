@@ -3,6 +3,7 @@ import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from TelegramGifts import TelegramGifts
+from TelegramGifts.exceptions import CacheError
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -27,11 +28,9 @@ def get_image_url(data: dict) -> str | None:
     """从库返回的数据中安全地提取图片链接"""
     if not data:
         return None
-    # 尝试常见的链接字段
     links = data.get('links')
     if isinstance(links, dict):
         return links.get('webp') or links.get('png') or links.get('image')
-    # 有时顶层直接有 image 字段
     return data.get('image') or data.get('image_url')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,16 +61,21 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text(f"🔍 正在查询 `{user_input}` ...")
 
     try:
-        # === 智能解析：尝试不同的拆分方式，找到有效的礼物名 ===
+        # === 智能解析 ===
         gift_name = None
         extra_query = None
 
-        # 从最长的礼物名开始尝试
         for i in range(len(tokens), 0, -1):
             candidate_gift = " ".join(tokens[:i])
             candidate_extra = " ".join(tokens[i:]) if i < len(tokens) else None
 
-            info = gifts.get_gift(candidate_gift)
+            try:
+                info = gifts.get_gift(candidate_gift)
+            except Exception as e:
+                # 捕获底层网络异常，避免误报“未找到”
+                logging.error(f"底层查询异常: {e}")
+                raise CacheError("查询超时，请稍后重试")
+
             if info:
                 gift_name = candidate_gift
                 extra_query = candidate_extra
@@ -81,7 +85,7 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text(f"❌ 未找到名为 `{user_input}` 的礼物。")
             return
 
-        # 1. 如果用户只输入了礼物名，显示整体价格
+        # 1. 整体查询
         if not extra_query:
             info = gifts.get_gift(gift_name)
             full_name = info.get('full_name', gift_name)
@@ -103,43 +107,40 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await processing_msg.edit_text("\n".join(lines), parse_mode='Markdown')
 
-            # === 尝试发送图片 ===
             image_url = get_image_url(info)
             if image_url:
                 try:
                     await context.bot.send_photo(
                         chat_id=update.effective_chat.id,
                         photo=image_url,
-                        caption=f"🎨 {full_name} 的 NFT 图片"
+                        caption=f"🎨 {full_name}"
                     )
                 except Exception as img_err:
-                    logging.warning(f"发送图片失败 (URL: {image_url}): {img_err}")
-            else:
-                logging.info(f"未找到 {full_name} 的图片链接")
+                    logging.warning(f"发送图片失败: {img_err}")
             return
 
-        # 2. 用户指定了款式或背景关键词
+        # 2. 款式/背景查询
         gift_id = gift_name.lower().replace(" ", "_").replace("'", "")
 
         # 尝试按款式查询
         model = gifts.get_model_details(gift_id, extra_query)
         if model:
-            msg = f"*{model.get('name', extra_query)}* 款式价格：\n"
+            model_name = model.get('name', extra_query)
+            msg = f"*{model_name}* 款式价格：\n"
             msg += f"💰 价格：`{model.get('price_ton', 'N/A')}` TON\n"
             msg += f"🔹 稀有度：`{model.get('rarity', 'N/A')}`"
             await processing_msg.edit_text(msg, parse_mode='Markdown')
 
-            # === 尝试发送款式图片 ===
             image_url = get_image_url(model)
             if image_url:
                 try:
                     await context.bot.send_photo(
                         chat_id=update.effective_chat.id,
                         photo=image_url,
-                        caption=f"🎨 {model.get('name', extra_query)} 款式图片"
+                        caption=f"🎨 {gift_name}\n款式：{model_name}\n价格：{model.get('price_ton', 'N/A')} TON"
                     )
                 except Exception as img_err:
-                    logging.warning(f"发送款式图片失败 (URL: {image_url}): {img_err}")
+                    logging.warning(f"发送款式图片失败: {img_err}")
             return
 
         # 尝试按背景查询
@@ -154,17 +155,16 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += f"🔹 稀有度：`{bg.get('rarity', 'N/A')}`"
                     await processing_msg.edit_text(msg, parse_mode='Markdown')
 
-                    # === 尝试发送背景图片 ===
                     image_url = get_image_url(bg)
                     if image_url:
                         try:
                             await context.bot.send_photo(
                                 chat_id=update.effective_chat.id,
                                 photo=image_url,
-                                caption=f"🎨 {bg_name} 背景图片"
+                                caption=f"🎨 {gift_name}\n背景：{bg_name}\n价格：{bg.get('price_ton', 'N/A')} TON"
                             )
                         except Exception as img_err:
-                            logging.warning(f"发送背景图片失败 (URL: {image_url}): {img_err}")
+                            logging.warning(f"发送背景图片失败: {img_err}")
                     return
 
         await processing_msg.edit_text(
@@ -172,6 +172,10 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"请尝试其他关键词，或直接发送 `{gift_name}` 查询整体价格。"
         )
 
+    except CacheError:
+        await processing_msg.edit_text(
+            "⏳ 查询超时了，这通常是因为网络波动或数据正在同步。\n请稍后再试一次！"
+        )
     except Exception as e:
         logging.error(f"查询 {user_input} 时出错: {e}")
         await processing_msg.edit_text("❌ 查询过程中出现错误，请稍后再试。")

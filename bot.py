@@ -44,26 +44,37 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_input:
         return
 
-    parts = user_input.split()
-    if not parts:
+    tokens = user_input.split()
+    if not tokens:
         return
-
-    # 将礼物名称转换为库所需的内部ID格式（小写+下划线）
-    base_name = parts[0]
-    gift_id = base_name.lower().replace(" ", "_").replace("'", "")
-    extra_query = " ".join(parts[1:]) if len(parts) > 1 else None
 
     processing_msg = await update.message.reply_text(f"🔍 正在查询 `{user_input}` ...")
 
     try:
-        # 1. 如果用户只输入了基础礼物名，显示整体价格
-        if not extra_query:
-            info = gifts.get_gift(base_name)
-            if not info:
-                await processing_msg.edit_text(f"❌ 未找到名为 `{base_name}` 的礼物。")
-                return
+        # === 智能解析：尝试不同的拆分方式，找到有效的礼物名 ===
+        gift_name = None
+        extra_query = None
 
-            full_name = info.get('full_name', base_name)
+        # 从最长的礼物名开始尝试（最多用所有词作为礼物名）
+        for i in range(len(tokens), 0, -1):
+            candidate_gift = " ".join(tokens[:i])
+            candidate_extra = " ".join(tokens[i:]) if i < len(tokens) else None
+
+            # 用库验证这个礼物名是否存在
+            info = gifts.get_gift(candidate_gift)
+            if info:
+                gift_name = candidate_gift
+                extra_query = candidate_extra
+                break
+
+        if not gift_name:
+            await processing_msg.edit_text(f"❌ 未找到名为 `{user_input}` 的礼物。")
+            return
+
+        # 1. 如果用户只输入了礼物名，显示整体价格
+        if not extra_query:
+            info = gifts.get_gift(gift_name)
+            full_name = info.get('full_name', gift_name)
             prices = info.get('prices', {})
             fragment_price = prices.get('fragment_price_ton')
             getgems_price = prices.get('getgems_price_ton')
@@ -84,7 +95,10 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # 2. 用户指定了款式或背景关键词
-        # 先尝试按款式查询（使用库提供的专用方法）
+        # 将礼物名转换为库所需的内部ID格式（小写+下划线）
+        gift_id = gift_name.lower().replace(" ", "_").replace("'", "")
+
+        # 尝试按款式查询
         model = gifts.get_model_details(gift_id, extra_query)
         if model:
             msg = f"*{model.get('name', extra_query)}* 款式价格：\n"
@@ -93,8 +107,8 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text(msg, parse_mode='Markdown')
             return
 
-        # 如果款式没找到，尝试从礼物的背景列表中模糊匹配
-        info = gifts.get_gift(base_name)
+        # 尝试按背景查询：从礼物的背景列表中模糊匹配
+        info = gifts.get_gift(gift_name)
         if info:
             backdrops = info.get('backdrops', [])
             for bg in backdrops:
@@ -107,8 +121,8 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
         await processing_msg.edit_text(
-            f"❌ 在 `{base_name}` 中未找到包含 `{extra_query}` 的款式或背景。\n"
-            f"请尝试其他关键词，或直接发送 `{base_name}` 查询整体价格。"
+            f"❌ 在 `{gift_name}` 中未找到包含 `{extra_query}` 的款式或背景。\n"
+            f"请尝试其他关键词，或直接发送 `{gift_name}` 查询整体价格。"
         )
 
     except Exception as e:

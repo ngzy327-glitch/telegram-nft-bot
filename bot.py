@@ -28,7 +28,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "👋 你好！我是 Fragment NFT 礼物价格查询机器人。\n\n"
-        "直接发送礼物名称即可查询，例如：\n"
+        "直接发送礼物名称即可查询整体价格，例如：\n"
         "`Artisan Brick`\n\n"
         "查询特定款式：\n"
         "`Artisan Brick Pro Gamer`\n\n"
@@ -48,7 +48,9 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not parts:
         return
 
+    # 将礼物名称转换为库所需的内部ID格式（小写+下划线）
     base_name = parts[0]
+    gift_id = base_name.lower().replace(" ", "_").replace("'", "")
     extra_query = " ".join(parts[1:]) if len(parts) > 1 else None
 
     processing_msg = await update.message.reply_text(f"🔍 正在查询 `{user_input}` ...")
@@ -82,10 +84,7 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # 2. 用户指定了款式或背景关键词
-        # 将礼物名转换为库所需的内部ID格式（小写+下划线）
-        gift_id = base_name.lower().replace(" ", "_").replace("'", "")
-
-        # 先尝试按款式查询
+        # 先尝试按款式查询（使用库提供的专用方法）
         model = gifts.get_model_details(gift_id, extra_query)
         if model:
             msg = f"*{model.get('name', extra_query)}* 款式价格：\n"
@@ -94,8 +93,7 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text(msg, parse_mode='Markdown')
             return
 
-        # 如果款式没找到，再尝试按背景查询
-        # 库可能没有 get_backdrop_details，我们通过遍历 gift 的 backdrops 列表来匹配
+        # 如果款式没找到，尝试从礼物的背景列表中模糊匹配
         info = gifts.get_gift(base_name)
         if info:
             backdrops = info.get('backdrops', [])

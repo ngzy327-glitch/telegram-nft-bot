@@ -51,21 +51,25 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text(f"🔍 正在查询 `{user_input}` ...")
 
     try:
-        # === 智能解析：尝试不同的拆分方式，找到有效的礼物名 ===
+        # 尝试解析方式：
+        # 1. 先拿完整输入作为礼物名试试
+        # 2. 如果不行，去掉最后一个词，剩下的作为礼物名，最后一个词作为属性
         gift_name = None
         extra_query = None
 
-        # 从最长的礼物名开始尝试（最多用所有词作为礼物名）
-        for i in range(len(tokens), 0, -1):
-            candidate_gift = " ".join(tokens[:i])
-            candidate_extra = " ".join(tokens[i:]) if i < len(tokens) else None
-
-            # 用库验证这个礼物名是否存在
-            info = gifts.get_gift(candidate_gift)
-            if info:
-                gift_name = candidate_gift
-                extra_query = candidate_extra
-                break
+        full_info = gifts.get_gift(user_input)
+        if full_info:
+            gift_name = user_input
+            extra_query = None
+        else:
+            # 尝试把最后一个词作为属性
+            if len(tokens) >= 2:
+                candidate_gift = " ".join(tokens[:-1])
+                candidate_extra = tokens[-1]
+                info = gifts.get_gift(candidate_gift)
+                if info:
+                    gift_name = candidate_gift
+                    extra_query = candidate_extra
 
         if not gift_name:
             await processing_msg.edit_text(f"❌ 未找到名为 `{user_input}` 的礼物。")
@@ -94,11 +98,10 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text("\n".join(lines), parse_mode='Markdown')
             return
 
-        # 2. 用户指定了款式或背景关键词
-        # 将礼物名转换为库所需的内部ID格式（小写+下划线）
+        # 2. 用户指定了属性（款式或背景）
         gift_id = gift_name.lower().replace(" ", "_").replace("'", "")
 
-        # 尝试按款式查询
+        # 先尝试按款式查询
         model = gifts.get_model_details(gift_id, extra_query)
         if model:
             msg = f"*{model.get('name', extra_query)}* 款式价格：\n"
@@ -107,7 +110,7 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text(msg, parse_mode='Markdown')
             return
 
-        # 尝试按背景查询：从礼物的背景列表中模糊匹配
+        # 尝试按背景查询
         info = gifts.get_gift(gift_name)
         if info:
             backdrops = info.get('backdrops', [])

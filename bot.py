@@ -2,12 +2,14 @@ import os
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from portalsmp import search_gifts
+from portalsmp import search
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
+# Portals 需要认证，请去 web.telegram.org 抓包获取 tma 开头的 token
+PORTALS_AUTH = os.getenv("PORTALS_AUTH")
 
 if not BOT_TOKEN:
     raise RuntimeError("请在 Railway Variables 中设置 TELEGRAM_BOT_TOKEN")
@@ -30,39 +32,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "直接发送礼物名称，例如：`Plush Pepe`\n\n"
         "📌 查询特定款式/背景：\n"
         "`Plush Pepe Wizard`\n"
-        "`Plush Pepe Black`\n"
-        "`Plush Pepe Gold`\n\n"
+        "`Plush Pepe Black`\n\n"
         "📌 精确筛选（用 / 分隔）：\n"
-        "`Plush Pepe / Wizard / Black`\n"
-        "`Plush Pepe / Gold / Blue`"
+        "`Plush Pepe / Wizard / Black`"
     )
-
-def format_gift(gift: dict) -> str:
-    """格式化单个礼物信息"""
-    name = gift.get('name', '未知')
-    price = gift.get('price', 'N/A')
-    floor = gift.get('floor_price', 'N/A')
-    
-    attrs = gift.get('attributes', [])
-    model = backdrop = symbol = None
-    for attr in attrs:
-        t = attr.get('type', '')
-        if t == 'model':
-            model = f"{attr.get('value')} (稀有度 {attr.get('rarity_per_mille', 'N/A')}‰)"
-        elif t == 'backdrop':
-            backdrop = f"{attr.get('value')} (稀有度 {attr.get('rarity_per_mille', 'N/A')}‰)"
-        elif t == 'symbol':
-            symbol = f"{attr.get('value')} (稀有度 {attr.get('rarity_per_mille', 'N/A')}‰)"
-    
-    lines = [f"🎁 *{name}*"]
-    if model:
-        lines.append(f"  款式：{model}")
-    if backdrop:
-        lines.append(f"  背景：{backdrop}")
-    if symbol:
-        lines.append(f"  符号：{symbol}")
-    lines.append(f"  💰 价格：{price} TON | 地板价：{floor} TON")
-    return "\n".join(lines)
 
 async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
@@ -77,7 +50,20 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = [p.strip() for p in user_input.split("/") if p.strip()]
     else:
         tokens = user_input.split()
-        parts = tokens
+        # 智能拆分：从最长匹配开始尝试
+        parts = []
+        for i in range(len(tokens), 0, -1):
+            candidate = " ".join(tokens[:i])
+            # 先用候选名称试查一下
+            try:
+                test = search(gift_name=candidate, limit=1, authData=PORTALS_AUTH)
+                if test:
+                    parts = [candidate] + tokens[i:]
+                    break
+            except Exception:
+                continue
+        if not parts:
+            parts = tokens
 
     if not parts:
         return
@@ -85,54 +71,65 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text(f"🔍 正在查询 `{user_input}` ...")
 
     try:
-        # 用礼物名搜索
         gift_name = parts[0]
-        results = search_gifts(gift_name)
+        filters = parts[1:] if len(parts) > 1 else []
+
+        # 构建搜索参数
+        search_params = {
+            "gift_name": gift_name,
+            "limit": 20,
+            "sort": "price_asc",
+            "authData": PORTALS_AUTH,
+        }
+
+        # 如果有关键词，尝试匹配 model 或 backdrop
+        if filters:
+            # 这里简单处理：把第一个关键词当作 model 或 backdrop 搜索
+            # 更精确的匹配可以在拿到结果后二次过滤
+            search_params["model"] = filters[0] if len(filters) >= 1 else None
+            search_params["backdrop"] = filters[1] if len(filters) >= 2 else None
+
+        # 清理 None 值
+        search_params = {k: v for k, v in search_params.items() if v is not None}
+
+        results = search(**search_params)
 
         if not results:
-            await processing_msg.edit_text(f"❌ 未找到名为 `{gift_name}` 的礼物。")
+            await processing_msg.edit_text(
+                f"❌ 未找到名为 `{gift_name}` 的礼物，或没有匹配的款式/背景。"
+            )
             return
 
-        # 如果有属性筛选条件
-        if len(parts) > 1:
-            filters = parts[1:]
-            matched = []
+        # 格式化输出
+        reply = f"📊 *{gift_name}* 匹配结果（{len(results)} 条）：\n\n"
+        for gift in results[:5]:
+            name = gift.get("name", gift_name)
+            price = gift.get("price", "N/A")
+            floor = gift.get("floor_price", "N/A")
 
-            for gift in results:
-                attrs = gift.get('attributes', [])
-                attr_values = {a.get('type'): a.get('value', '').lower() for a in attrs}
+            attrs = gift.get("attributes", [])
+            model_str = backdrop_str = symbol_str = ""
+            for attr in attrs:
+                t = attr.get("type", "")
+                v = attr.get("value", "")
+                r = attr.get("rarity_per_mille", "N/A")
+                if t == "model":
+                    model_str = f"  款式：{v} (稀有度 {r}‰)\n"
+                elif t == "backdrop":
+                    backdrop_str = f"  背景：{v} (稀有度 {r}‰)\n"
+                elif t == "symbol":
+                    symbol_str = f"  符号：{v} (稀有度 {r}‰)\n"
 
-                # 检查所有筛选条件是否都匹配
-                all_match = True
-                for f in filters:
-                    f_lower = f.lower()
-                    # 在所有属性值中查找
-                    if not any(f_lower in v for v in attr_values.values()):
-                        all_match = False
-                        break
+            reply += f"🎁 *{name}*\n"
+            if model_str: reply += model_str
+            if backdrop_str: reply += backdrop_str
+            if symbol_str: reply += symbol_str
+            reply += f"  💰 价格：{price} TON | 地板价：{floor} TON\n\n"
 
-                if all_match:
-                    matched.append(gift)
+        if len(results) > 5:
+            reply += f"... 还有 {len(results) - 5} 条结果"
 
-            if matched:
-                reply = f"📊 *{gift_name}* 匹配结果（{len(matched)} 条）：\n\n"
-                for g in matched[:5]:  # 最多显示5条
-                    reply += format_gift(g) + "\n\n"
-                if len(matched) > 5:
-                    reply += f"... 还有 {len(matched) - 5} 条结果"
-                await processing_msg.edit_text(reply, parse_mode='Markdown')
-            else:
-                await processing_msg.edit_text(
-                    f"❌ 在 `{gift_name}` 中未找到包含 `{' '.join(filters)}` 的款式或背景。\n"
-                    f"请尝试其他关键词，或直接发送 `{gift_name}` 查询整体价格。"
-                )
-        else:
-            # 只查礼物名，显示最便宜的几条
-            sorted_results = sorted(results, key=lambda x: float(x.get('price', 0) or 0))
-            reply = f"📊 *{gift_name}* 价格信息（最低价）：\n\n"
-            for g in sorted_results[:5]:
-                reply += format_gift(g) + "\n\n"
-            await processing_msg.edit_text(reply, parse_mode='Markdown')
+        await processing_msg.edit_text(reply, parse_mode='Markdown')
 
     except Exception as e:
         logging.error(f"查询 {user_input} 时出错: {e}")
@@ -147,3 +144,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+  

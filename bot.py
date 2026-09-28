@@ -23,6 +23,17 @@ def is_allowed(update: Update) -> bool:
         return False
     return True
 
+def get_image_url(data: dict) -> str | None:
+    """从库返回的数据中安全地提取图片链接"""
+    if not data:
+        return None
+    # 尝试常见的链接字段
+    links = data.get('links')
+    if isinstance(links, dict):
+        return links.get('webp') or links.get('png') or links.get('image')
+    # 有时顶层直接有 image 字段
+    return data.get('image') or data.get('image_url')
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -51,25 +62,20 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text(f"🔍 正在查询 `{user_input}` ...")
 
     try:
-        # 尝试解析方式：
-        # 1. 先拿完整输入作为礼物名试试
-        # 2. 如果不行，去掉最后一个词，剩下的作为礼物名，最后一个词作为属性
+        # === 智能解析：尝试不同的拆分方式，找到有效的礼物名 ===
         gift_name = None
         extra_query = None
 
-        full_info = gifts.get_gift(user_input)
-        if full_info:
-            gift_name = user_input
-            extra_query = None
-        else:
-            # 尝试把最后一个词作为属性
-            if len(tokens) >= 2:
-                candidate_gift = " ".join(tokens[:-1])
-                candidate_extra = tokens[-1]
-                info = gifts.get_gift(candidate_gift)
-                if info:
-                    gift_name = candidate_gift
-                    extra_query = candidate_extra
+        # 从最长的礼物名开始尝试
+        for i in range(len(tokens), 0, -1):
+            candidate_gift = " ".join(tokens[:i])
+            candidate_extra = " ".join(tokens[i:]) if i < len(tokens) else None
+
+            info = gifts.get_gift(candidate_gift)
+            if info:
+                gift_name = candidate_gift
+                extra_query = candidate_extra
+                break
 
         if not gift_name:
             await processing_msg.edit_text(f"❌ 未找到名为 `{user_input}` 的礼物。")
@@ -96,18 +102,44 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append("暂时没有找到该礼物的市场价格。")
 
             await processing_msg.edit_text("\n".join(lines), parse_mode='Markdown')
+
+            # === 尝试发送图片 ===
+            image_url = get_image_url(info)
+            if image_url:
+                try:
+                    await context.bot.send_photo(
+                        chat_id=update.effective_chat.id,
+                        photo=image_url,
+                        caption=f"🎨 {full_name} 的 NFT 图片"
+                    )
+                except Exception as img_err:
+                    logging.warning(f"发送图片失败 (URL: {image_url}): {img_err}")
+            else:
+                logging.info(f"未找到 {full_name} 的图片链接")
             return
 
-        # 2. 用户指定了属性（款式或背景）
+        # 2. 用户指定了款式或背景关键词
         gift_id = gift_name.lower().replace(" ", "_").replace("'", "")
 
-        # 先尝试按款式查询
+        # 尝试按款式查询
         model = gifts.get_model_details(gift_id, extra_query)
         if model:
             msg = f"*{model.get('name', extra_query)}* 款式价格：\n"
             msg += f"💰 价格：`{model.get('price_ton', 'N/A')}` TON\n"
             msg += f"🔹 稀有度：`{model.get('rarity', 'N/A')}`"
             await processing_msg.edit_text(msg, parse_mode='Markdown')
+
+            # === 尝试发送款式图片 ===
+            image_url = get_image_url(model)
+            if image_url:
+                try:
+                    await context.bot.send_photo(
+                        chat_id=update.effective_chat.id,
+                        photo=image_url,
+                        caption=f"🎨 {model.get('name', extra_query)} 款式图片"
+                    )
+                except Exception as img_err:
+                    logging.warning(f"发送款式图片失败 (URL: {image_url}): {img_err}")
             return
 
         # 尝试按背景查询
@@ -121,6 +153,18 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg += f"💰 价格：`{bg.get('price_ton', 'N/A')}` TON\n"
                     msg += f"🔹 稀有度：`{bg.get('rarity', 'N/A')}`"
                     await processing_msg.edit_text(msg, parse_mode='Markdown')
+
+                    # === 尝试发送背景图片 ===
+                    image_url = get_image_url(bg)
+                    if image_url:
+                        try:
+                            await context.bot.send_photo(
+                                chat_id=update.effective_chat.id,
+                                photo=image_url,
+                                caption=f"🎨 {bg_name} 背景图片"
+                            )
+                        except Exception as img_err:
+                            logging.warning(f"发送背景图片失败 (URL: {image_url}): {img_err}")
                     return
 
         await processing_msg.edit_text(

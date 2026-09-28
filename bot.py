@@ -16,22 +16,22 @@ logging.basicConfig(
 # 环境变量
 # ==========================
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")  # 可选：限制只有你能用
+ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
 
 if not BOT_TOKEN:
     raise RuntimeError("请在 Railway Variables 中设置 TELEGRAM_BOT_TOKEN")
 
 # ==========================
 # 初始化 TelegramGifts
-# 缓存目录指向 /data，配合 Railway Volume 实现持久化
+# 【关键修改】：去掉了 cache_dir 参数，使用默认缓存目录
+# 这样就不需要 Railway 的 Volume 也能运行
 # ==========================
-gifts = TelegramGifts(cache_dir="/data/telegram_gifts_cache")
+gifts = TelegramGifts()
 
 # ==========================
 # 权限检查
 # ==========================
 def is_allowed(update: Update) -> bool:
-    """如果设置了 ALLOWED_USER_ID，则只允许该用户使用"""
     if not ALLOWED_USER_ID:
         return True
     user_id = str(update.effective_user.id)
@@ -66,7 +66,6 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        # 查询礼物信息
         info = gifts.get_gift(gift_name)
 
         if not info:

@@ -2,17 +2,23 @@ import os
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from portalsmp import search
+from portalsmp import Client
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
-# Portals 需要认证，请去 web.telegram.org 抓包获取 tma 开头的 token
+# 确保环境变量 PORTALS_AUTH 已正确配置，且值以 "tma " 开头
 PORTALS_AUTH = os.getenv("PORTALS_AUTH")
 
 if not BOT_TOKEN:
     raise RuntimeError("请在 Railway Variables 中设置 TELEGRAM_BOT_TOKEN")
+
+# 初始化 Portals 客户端
+try:
+    client = Client(authData=PORTALS_AUTH)
+except Exception as e:
+    raise RuntimeError(f"Portals 客户端初始化失败，请检查 PORTALS_AUTH 变量: {e}")
 
 def is_allowed(update: Update) -> bool:
     if not ALLOWED_USER_ID:
@@ -45,64 +51,54 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_input:
         return
 
-    # 解析输入：支持 "礼物名 属性" 或 "礼物名 / 属性1 / 属性2"
-    if "/" in user_input:
-        parts = [p.strip() for p in user_input.split("/") if p.strip()]
-    else:
-        tokens = user_input.split()
-        # 智能拆分：从最长匹配开始尝试
-        parts = []
-        for i in range(len(tokens), 0, -1):
-            candidate = " ".join(tokens[:i])
-            # 先用候选名称试查一下
-            try:
-                test = search(gift_name=candidate, limit=1, authData=PORTALS_AUTH)
-                if test:
-                    parts = [candidate] + tokens[i:]
-                    break
-            except Exception:
-                continue
-        if not parts:
-            parts = tokens
-
-    if not parts:
+    tokens = user_input.split()
+    if not tokens:
         return
 
     processing_msg = await update.message.reply_text(f"🔍 正在查询 `{user_input}` ...")
 
     try:
-        gift_name = parts[0]
-        filters = parts[1:] if len(parts) > 1 else []
+        # 智能解析：尝试从长到短匹配礼物名
+        gift_name = None
+        extra_filters = []
+        for i in range(len(tokens), 0, -1):
+            candidate = " ".join(tokens[:i])
+            # 用库提供的 search 方法探测是否存在该礼物
+            try:
+                test_results = client.search(gift_name=candidate, limit=1)
+                if test_results:
+                    gift_name = candidate
+                    extra_filters = tokens[i:]
+                    break
+            except Exception:
+                continue
 
-        # 构建搜索参数
-        search_params = {
-            "gift_name": gift_name,
-            "limit": 20,
-            "sort": "price_asc",
-            "authData": PORTALS_AUTH,
-        }
+        if not gift_name:
+            await processing_msg.edit_text(f"❌ 未找到名为 `{user_input}` 的礼物。")
+            return
 
-        # 如果有关键词，尝试匹配 model 或 backdrop
-        if filters:
-            # 这里简单处理：把第一个关键词当作 model 或 backdrop 搜索
-            # 更精确的匹配可以在拿到结果后二次过滤
-            search_params["model"] = filters[0] if len(filters) >= 1 else None
-            search_params["backdrop"] = filters[1] if len(filters) >= 2 else None
-
-        # 清理 None 值
-        search_params = {k: v for k, v in search_params.items() if v is not None}
-
-        results = search(**search_params)
+        # 执行查询
+        if len(extra_filters) >= 1:
+            # 带筛选条件查询
+            results = client.search(
+                gift_name=gift_name,
+                model=extra_filters[0] if len(extra_filters) >= 1 else None,
+                backdrop=extra_filters[1] if len(extra_filters) >= 2 else None,
+                limit=10
+            )
+        else:
+            # 整体查询
+            results = client.search(gift_name=gift_name, limit=5, sort="price_asc")
 
         if not results:
             await processing_msg.edit_text(
-                f"❌ 未找到名为 `{gift_name}` 的礼物，或没有匹配的款式/背景。"
+                f"❌ 在 `{gift_name}` 中未找到匹配的款式或背景。"
             )
             return
 
         # 格式化输出
         reply = f"📊 *{gift_name}* 匹配结果（{len(results)} 条）：\n\n"
-        for gift in results[:5]:
+        for gift in results:
             name = gift.get("name", gift_name)
             price = gift.get("price", "N/A")
             floor = gift.get("floor_price", "N/A")
@@ -126,8 +122,8 @@ async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if symbol_str: reply += symbol_str
             reply += f"  💰 价格：{price} TON | 地板价：{floor} TON\n\n"
 
-        if len(results) > 5:
-            reply += f"... 还有 {len(results) - 5} 条结果"
+        if len(results) >= 5 and len(extra_filters) == 0:
+            reply += f"... 仅展示最低的 5 条结果"
 
         await processing_msg.edit_text(reply, parse_mode='Markdown')
 
@@ -144,4 +140,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-  

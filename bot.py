@@ -1,127 +1,168 @@
+import asyncio
 import os
+import random
+import string
+import time
 import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from portalsmp import search
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes
+)
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
-# 确保环境变量 PORTALS_AUTH 已正确配置，且值以 "tma " 开头
-PORTALS_AUTH = os.getenv("PORTALS_AUTH")
+# ========== 环境变量 ==========
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))       # 你的 TG 用户ID，用于管理命令
+# =============================
 
-if not BOT_TOKEN:
-    raise RuntimeError("请在 Railway Variables 中设置 TELEGRAM_BOT_TOKEN")
-if not PORTALS_AUTH:
-    raise RuntimeError("请在 Railway Variables 中设置 PORTALS_AUTH")
+if not BOT_TOKEN or not ADMIN_ID:
+    print("❌ 缺少 BOT_TOKEN 或 ADMIN_ID")
+    exit(1)
 
-def is_allowed(update: Update) -> bool:
-    if not ALLOWED_USER_ID:
-        return True
-    return str(update.effective_user.id) == ALLOWED_USER_ID
+# 内存数据：{红包ID: {"total": 总额, "left": 剩余个数, "amounts": [], "claimed": {}, "answer": "xxx"}}
+REDPACKETS = {}
+RP_COUNTER = [0]  # 用列表模拟全局计数器
+
+def gen_code(length=4):
+    """生成随机验证码（大小写字母混合）"""
+    return ''.join(random.choices(string.ascii_letters, k=length))
+
+def gen_fake_codes(correct, count):
+    """生成 count 个干扰码，跟正确答案不重复"""
+    codes = {correct}
+    while len(codes) < count:
+        codes.add(gen_code(len(correct)))
+    return list(codes)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
+    await update.message.reply_text("红包机器人已启动。管理员发送 /send 金额 个数 来发红包。")
+
+async def send_rp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """管理员命令：/send 金额 个数"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⚠️ 只有管理员可以发红包。")
         return
-    await update.message.reply_text(
-        "👋 你好！我是 Fragment NFT 礼物价格查询机器人。\n\n"
-        "📌 查询整体价格：\n"
-        "`Plush Pepe`\n\n"
-        "📌 查询特定款式/背景：\n"
-        "`Plush Pepe Wizard`\n"
-        "`Plush Pepe Black`\n\n"
-        "📌 精确筛选：\n"
-        "`Plush Pepe / Wizard / Black`"
-    )
-
-async def query_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        return
-
-    user_input = update.message.text.strip()
-    if not user_input:
-        return
-
-    if "/" in user_input:
-        parts = [p.strip() for p in user_input.split("/") if p.strip()]
-    else:
-        parts = user_input.split()
-
-    if not parts:
-        return
-
-    processing_msg = await update.message.reply_text(f"🔍 正在查询 `{user_input}` ...")
 
     try:
-        gift_name = parts[0]
-        filters = parts[1:] if len(parts) > 1 else []
+        total = float(context.args[0])
+        count = int(context.args[1])
+        if total <= 0 or count <= 0:
+            raise ValueError
+    except (IndexError, ValueError):
+        await update.message.reply_text("格式：/send 金额 个数\n例如：/send 10 5")
+        return
 
-        # 调用 search 函数，并显式传入 authData
-        if len(filters) >= 2:
-            results = search(
-                gift_name=gift_name,
-                model=filters[0],
-                backdrop=filters[1],
-                limit=10,
-                authData=PORTALS_AUTH
-            )
-        elif len(filters) == 1:
-            results = search(
-                gift_name=gift_name,
-                model=filters[0],
-                limit=10,
-                authData=PORTALS_AUTH
-            )
-        else:
-            results = search(
-                gift_name=gift_name,
-                limit=5,
-                sort="price_asc",
-                authData=PORTALS_AUTH
-            )
+    # 生成随机金额（拼手气红包）
+    amounts = []
+    remaining = total
+    for i in range(count - 1):
+        # 每次随机取剩余金额的 0~剩余均值*2 之间
+        avg = remaining / (count - i)
+        m = round(random.uniform(0.01, avg * 2), 2)
+        m = min(m, remaining - 0.01 * (count - i - 1))
+        amounts.append(m)
+        remaining -= m
+    amounts.append(round(remaining, 2))
+    random.shuffle(amounts)
 
-        if not results:
-            await processing_msg.edit_text(f"❌ 未找到名为 `{gift_name}` 的礼物，或没有匹配的款式/背景。")
-            return
+    # 生成验证码和按钮
+    answer = gen_code(4)
+    fake_codes = gen_fake_codes(answer, random.randint(4, 8))
+    random.shuffle(fake_codes)
 
-        reply = f"📊 *{gift_name}* 匹配结果（{len(results)} 条）：\n\n"
-        for gift in results:
-            name = gift.get("name", gift_name)
-            price = gift.get("price", "N/A")
-            floor = gift.get("floor_price", "N/A")
+    RP_COUNTER[0] += 1
+    rp_id = RP_COUNTER[0]
 
-            attrs = gift.get("attributes", [])
-            model_str = backdrop_str = symbol_str = ""
-            for attr in attrs:
-                t = attr.get("type", "")
-                v = attr.get("value", "")
-                r = attr.get("rarity_per_mille", "N/A")
-                if t == "model":
-                    model_str = f"  款式：{v} (稀有度 {r}‰)\n"
-                elif t == "backdrop":
-                    backdrop_str = f"  背景：{v} (稀有度 {r}‰)\n"
-                elif t == "symbol":
-                    symbol_str = f"  符号：{v} (稀有度 {r}‰)\n"
+    REDPACKETS[rp_id] = {
+        "total": total,
+        "left": count,
+        "amounts": amounts,
+        "claimed": {},   # user_id -> amount
+        "answer": answer,
+    }
 
-            reply += f"🎁 *{name}*\n"
-            if model_str: reply += model_str
-            if backdrop_str: reply += backdrop_str
-            if symbol_str: reply += symbol_str
-            reply += f"  💰 价格：{price} TON | 地板价：{floor} TON\n\n"
+    # 构建按钮键盘（每行2个按钮）
+    keyboard = []
+    row = []
+    for code in fake_codes:
+        row.append(InlineKeyboardButton(code, callback_data=f"rp:{rp_id}:{code}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
 
-        await processing_msg.edit_text(reply, parse_mode='Markdown')
+    text = (
+        f"🧧 红包来了！\n"
+        f"总金额：{total} USDT\n"
+        f"红包个数：{count}\n"
+        f"请选择正确的验证码 <b>{answer}</b> 领取红包"
+    )
 
-    except Exception as e:
-        logging.error(f"查询 {user_input} 时出错: {e}")
-        await processing_msg.edit_text("❌ 查询过程中出现错误，请稍后再试。")
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
 
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理按钮点击"""
+    query = update.callback_query
+    user = query.from_user
+
+    try:
+        _, rp_id_str, clicked_code = query.data.split(":", 2)
+        rp_id = int(rp_id_str)
+    except Exception:
+        await query.answer("无效操作")
+        return
+
+    rp = REDPACKETS.get(rp_id)
+    if not rp:
+        await query.answer("红包不存在或已过期")
+        return
+
+    if user.id in rp["claimed"]:
+        await query.answer(f"你已经领过了：{rp['claimed'][user.id]} USDT")
+        return
+
+    if rp["left"] <= 0:
+        await query.answer("红包已被抢完")
+        return
+
+    # 判断验证码是否正确
+    if clicked_code != rp["answer"]:
+        await query.answer("❌ 验证码错误，再试一次")
+        return
+
+    # 领取
+    amount = rp["amounts"].pop(0)
+    rp["claimed"][user.id] = amount
+    rp["left"] -= 1
+
+    name = user.first_name or user.username or str(user.id)
+    await query.answer(f"✅ 你领到了 {amount} USDT")
+    await query.message.reply_text(
+        f"🎉 {name} 领到了 {amount} USDT\n剩余红包：{rp['left']} 个"
+    )
+
+    if rp["left"] == 0:
+        await query.message.reply_text(f"🧧 红包 {rp_id} 已抢完！")
+
+async def main():
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, query_gift))
-    print("🤖 Bot 已启动，正在运行...")
-    app.run_polling()
+    app.add_handler(CommandHandler("send", send_rp))
+    app.add_handler(CallbackQueryHandler(callback_handler, pattern=r"^rp:"))
+
+    print("🤖 红包机器人已启动")
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    # 保持运行
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())

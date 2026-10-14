@@ -2,7 +2,6 @@ import asyncio
 import os
 import random
 import string
-import time
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -13,23 +12,22 @@ logging.basicConfig(level=logging.INFO)
 
 # ========== 环境变量 ==========
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))       # 你的 TG 用户ID，用于管理命令
+# 多个管理员用逗号分隔，例如：123456789,987654321
+ADMIN_IDS_STR = os.environ.get("ADMIN_ID", "")
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip()]
 # =============================
 
-if not BOT_TOKEN or not ADMIN_ID:
+if not BOT_TOKEN or not ADMIN_IDS:
     print("❌ 缺少 BOT_TOKEN 或 ADMIN_ID")
     exit(1)
 
-# 内存数据：{红包ID: {"total": 总额, "left": 剩余个数, "amounts": [], "claimed": {}, "answer": "xxx"}}
 REDPACKETS = {}
-RP_COUNTER = [0]  # 用列表模拟全局计数器
+RP_COUNTER = [0]
 
 def gen_code(length=4):
-    """生成随机验证码（大小写字母混合）"""
     return ''.join(random.choices(string.ascii_letters, k=length))
 
 def gen_fake_codes(correct, count):
-    """生成 count 个干扰码，跟正确答案不重复"""
     codes = {correct}
     while len(codes) < count:
         codes.add(gen_code(len(correct)))
@@ -39,8 +37,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("红包机器人已启动。管理员发送 /send 金额 个数 来发红包。")
 
 async def send_rp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员命令：/send 金额 个数"""
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⚠️ 只有管理员可以发红包。")
         return
 
@@ -53,11 +50,9 @@ async def send_rp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("格式：/send 金额 个数\n例如：/send 10 5")
         return
 
-    # 生成随机金额（拼手气红包）
     amounts = []
     remaining = total
     for i in range(count - 1):
-        # 每次随机取剩余金额的 0~剩余均值*2 之间
         avg = remaining / (count - i)
         m = round(random.uniform(0.01, avg * 2), 2)
         m = min(m, remaining - 0.01 * (count - i - 1))
@@ -66,7 +61,6 @@ async def send_rp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     amounts.append(round(remaining, 2))
     random.shuffle(amounts)
 
-    # 生成验证码和按钮
     answer = gen_code(4)
     fake_codes = gen_fake_codes(answer, random.randint(4, 8))
     random.shuffle(fake_codes)
@@ -78,11 +72,10 @@ async def send_rp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "total": total,
         "left": count,
         "amounts": amounts,
-        "claimed": {},   # user_id -> amount
+        "claimed": {},
         "answer": answer,
     }
 
-    # 构建按钮键盘（每行2个按钮）
     keyboard = []
     row = []
     for code in fake_codes:
@@ -107,7 +100,6 @@ async def send_rp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理按钮点击"""
     query = update.callback_query
     user = query.from_user
 
@@ -131,12 +123,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("红包已被抢完")
         return
 
-    # 判断验证码是否正确
     if clicked_code != rp["answer"]:
         await query.answer("❌ 验证码错误，再试一次")
         return
 
-    # 领取
     amount = rp["amounts"].pop(0)
     rp["claimed"][user.id] = amount
     rp["left"] -= 1
@@ -156,11 +146,10 @@ async def main():
     app.add_handler(CommandHandler("send", send_rp))
     app.add_handler(CallbackQueryHandler(callback_handler, pattern=r"^rp:"))
 
-    print("🤖 红包机器人已启动")
+    print(f"🤖 红包机器人已启动，管理员：{ADMIN_IDS}")
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
-    # 保持运行
     while True:
         await asyncio.sleep(3600)
 
